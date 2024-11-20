@@ -3,7 +3,6 @@ import 'package:http/http.dart' as http;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 class MainScreen extends StatefulWidget {
@@ -37,44 +36,83 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _loadSavedQuote() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _quote = prefs.getString('savedQuote') ?? 'Нажмите кнопку для получения случайной цитаты';
-      _author = prefs.getString('savedAuthor') ?? '';
-    });
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final userDoc = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    final userData = await userDoc.get();
+
+    if (userData.exists) {
+      setState(() {
+        _quote = userData.data()?['savedQuote'] ?? _quote;
+        _author = userData.data()?['savedAuthor'] ?? _author;
+      });
+    }
   }
 
   Future<void> _saveQuote(String quote, String author) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('savedQuote', quote);
-    await prefs.setString('savedAuthor', author);
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final userDoc = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    await userDoc.set({
+      'savedQuote': quote,
+      'savedAuthor': author,
+    }, SetOptions(merge: true));
   }
 
   Future<void> _loadFavoriteStatus() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _isFavorite = prefs.getBool('isFavorite') ?? false;
-    });
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final userDoc = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    final userData = await userDoc.get();
+
+    if (userData.exists) {
+      setState(() {
+        _isFavorite = userData.data()?['isFavorite'] ?? false;
+      });
+    }
   }
 
   Future<void> _saveFavoriteStatus(bool isFavorite) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('isFavorite', isFavorite);
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final userDoc = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    await userDoc.set({
+      'isFavorite': isFavorite,
+    }, SetOptions(merge: true));
   }
 
   Future<void> _checkQuoteAvailability() async {
-    final prefs = await SharedPreferences.getInstance();
-    final lastFetchTime = prefs.getInt('lastFetchTime') ?? 0;
-    final currentTime = DateTime.now().millisecondsSinceEpoch;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
 
-    if (currentTime - lastFetchTime < 6 * 60 * 60 * 1000) { // Проверка на 6 часов
-      final remainingTime =
-      Duration(milliseconds: (6 * 60 * 60 * 1000) - (currentTime - lastFetchTime));
+    final userDoc = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    final userData = await userDoc.get();
+
+    if (userData.exists && userData.data()?['lastFetchTime'] != null) {
+      final lastFetchTime = userData.data()?['lastFetchTime'].toDate();
+      final currentTime = DateTime.now();
+      final difference = currentTime.difference(lastFetchTime);
+
+      if (difference.inHours < 6) {
+        final remainingTime = Duration(hours: 6) - difference;
+        setState(() {
+          _isButtonDisabled = true;
+          _timeRemaining = remainingTime;
+        });
+        _startTimer();
+      } else {
+        setState(() {
+          _isButtonDisabled = false;
+        });
+      }
+    } else {
       setState(() {
-        _isButtonDisabled = true;
-        _timeRemaining = remainingTime;
+        _isButtonDisabled = false;
       });
-      _startTimer();
     }
   }
 
@@ -101,7 +139,7 @@ class _MainScreenState extends State<MainScreen> {
 
     try {
       final response = await http.get(
-        Uri.parse('https://zenquotes.io/api/random&keywords=inspirational'),
+        Uri.parse('https://zenquotes.io/api/random'),
       );
 
       if (response.statusCode == 200) {
@@ -109,21 +147,27 @@ class _MainScreenState extends State<MainScreen> {
         final String quote = data[0]['q'];
         final String author = data[0]['a'];
 
+        // Перевод цитаты на русский язык
         final String translatedQuote = await _translateText(quote, 'en', 'ru');
         final String translatedAuthor = await _translateText(author, 'en', 'ru');
 
         setState(() {
           _quote = translatedQuote;
           _author = translatedAuthor;
-          _isFavorite = false; // Сброс состояния избранного
+          _isFavorite = false;
         });
 
-        final prefs = await SharedPreferences.getInstance();
-        prefs.setInt('lastFetchTime', DateTime.now().millisecondsSinceEpoch);
-        _saveQuote(translatedQuote, translatedAuthor); // Сохранение цитаты
-        _saveFavoriteStatus(false); // Сброс состояния избранного
+        final user = FirebaseAuth.instance.currentUser;
+        if (user != null) {
+          final userDoc = FirebaseFirestore.instance.collection('users').doc(user.uid);
+          await userDoc.set({
+            'lastFetchTime': DateTime.now(),
+            'savedQuote': translatedQuote,
+            'savedAuthor': translatedAuthor,
+          }, SetOptions(merge: true));
+        }
 
-        _timeRemaining = const Duration(hours: 6); // Таймер на 6 часов
+        _timeRemaining = const Duration(hours: 6);
         _startTimer();
       } else {
         setState(() {
